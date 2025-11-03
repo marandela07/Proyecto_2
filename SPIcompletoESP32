@@ -1,0 +1,290 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <driver/spi_slave.h>
+
+// DEFINICIONES - CAMBIAR GPIO 13 → 14
+#define ledR 14     // ✅ Cambié a GPIO 14 (más estable)
+#define ledG 2
+#define ledA 4
+
+#define pot1 33
+#define SPI_SCK 18
+#define SPI_MISO 19
+#define SPI_MOSI 23
+#define SPI_SS 22
+
+#define I2C_DEV_ADDR 0x55
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+#define pwmChannel1 0
+#define pwmChannel2 1
+#define pwmChannel3 2
+#define freqPWM 5000
+#define resPWM 8
+
+// VARIABLES
+int spiLed = 0;
+int spiTiempo = 0;
+bool spiCmd = false;
+String ultimoLED = "N";
+
+uint8_t I2Cbuffer[4];
+bool I2CCmd = false;
+int i2cLed = 0;
+int i2cTiempo = 0;
+
+bool modoI2C = false;
+bool modoSPI = false;
+
+#define BUFFER_SIZE 32
+uint8_t spi_slave_rx_buf[BUFFER_SIZE];
+uint8_t spi_slave_tx_buf[BUFFER_SIZE];
+spi_slave_transaction_t t;
+
+// PROTOTIPOS
+void initPWM();
+void initSPI_Correct();
+void ejecutarComandoLed(int led, int tiempo);
+void procesarComandoSPI();
+void onReceive(int numBytes);
+void onRequest();
+
+// ============================================================
+// FUNCIÓN: initPWM - SIN REINICIALIZAR (solo la primera vez)
+// ============================================================
+void initPWM(){
+  Serial.println("[PWM] Configurando PWM...");
+  
+  ledcSetup(pwmChannel1, freqPWM, resPWM);
+  ledcAttachPin(ledR, pwmChannel1);
+  ledcWrite(pwmChannel1, 0);
+
+  ledcSetup(pwmChannel2, freqPWM, resPWM);
+  ledcAttachPin(ledG, pwmChannel2);
+  ledcWrite(pwmChannel2, 0);
+
+  ledcSetup(pwmChannel3, freqPWM, resPWM);
+  ledcAttachPin(ledA, pwmChannel3);
+  ledcWrite(pwmChannel3, 0);
+  
+  Serial.println("[PWM] ✓ PWM configurado");
+}
+
+// ============================================================
+// FUNCIÓN: initSPI_Correct - SIN REINICIALIZAR PWM
+// ============================================================
+void initSPI_Correct(){
+  Serial.println("[SPI] Inicializando SPI SLAVE...");
+  
+  spi_bus_config_t buscfg;
+  memset(&buscfg, 0, sizeof(buscfg));
+  buscfg.mosi_io_num = SPI_MOSI;
+  buscfg.miso_io_num = SPI_MISO;
+  buscfg.sclk_io_num = SPI_SCK;
+  buscfg.quadwp_io_num = -1;
+  buscfg.quadhd_io_num = -1;
+
+  spi_slave_interface_config_t slvcfg;
+  memset(&slvcfg, 0, sizeof(slvcfg));
+  slvcfg.mode = 0;
+  slvcfg.spics_io_num = SPI_SS;
+  slvcfg.queue_size = 3;
+  slvcfg.flags = 0;
+
+  spi_slave_initialize(VSPI_HOST, &buscfg, &slvcfg, 2);
+  memset(spi_slave_tx_buf, 0xAA, BUFFER_SIZE);
+  
+  Serial.println("[SPI] ✓ SPI inicializado - NO reiniciando PWM");
+}
+
+// ============================================================
+// FUNCIÓN: ejecutarComandoLed - VERSIÓN SIMPLIFICADA
+// ============================================================
+void ejecutarComandoLed(int led, int tiempo){
+  Serial.println("\n[LED] Apagando todos...");
+  digitalWrite(ledR, LOW);
+  digitalWrite(ledG, LOW);
+  digitalWrite(ledA, LOW);
+  delay(50);
+
+  switch (led){
+    case 1:
+      ultimoLED = "R";
+      Serial.println("[LED] ✓ ROJO ENCENDIDO");
+      digitalWrite(ledR, HIGH);
+      break;
+    case 2:
+      ultimoLED = "G";
+      Serial.println("[LED] ✓ VERDE ENCENDIDO");
+      digitalWrite(ledG, HIGH);
+      break;
+    case 3:
+      ultimoLED = "A";
+      Serial.println("[LED] ✓ AMARILLO ENCENDIDO");
+      digitalWrite(ledA, HIGH);
+      break;
+    default:
+      return;
+  }
+  
+  Serial.print("[LED] Duracion: ");
+  Serial.print(tiempo);
+  Serial.println(" ms");
+  delay(tiempo);
+
+  Serial.println("[LED] Apagando...");
+  digitalWrite(ledR, LOW);
+  digitalWrite(ledG, LOW);
+  digitalWrite(ledA, LOW);
+  Serial.println("[LED] ✓ LED apagado\n");
+  
+  modoI2C = false;
+  modoSPI = false;
+  spiCmd = false;
+  I2CCmd = false;
+}
+
+// ============================================================
+void procesarComandoSPI(){
+  if (spiCmd) {
+    Serial.println("\n[SPI] ═════════════════════════════");
+    Serial.print("[SPI] LED: ");
+    Serial.print(spiLed);
+    Serial.print(", Tiempo: ");
+    Serial.println(spiTiempo);
+    Serial.println("[SPI] ═════════════════════════════\n");
+    
+    modoSPI = true;
+    ejecutarComandoLed(spiLed, spiTiempo);
+    spiCmd = false;
+  }
+}
+
+void onReceive(int numBytes) {
+  int i = 0;
+  while (Wire.available() && i < 4) {
+    I2Cbuffer[i] = Wire.read();
+    i++;
+  }
+  
+  if (i >= 2) {
+    i2cLed = I2Cbuffer[0];
+    i2cTiempo = (I2Cbuffer[1] << 8) | I2Cbuffer[2];
+    I2CCmd = true;
+  }
+}
+
+void onRequest() {
+  if (ultimoLED == "R") {
+    Wire.write(1);
+  } else if (ultimoLED == "G") {
+    Wire.write(2);
+  } else if (ultimoLED == "A") {
+    Wire.write(3);
+  } else {
+    Wire.write(0);
+  }
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+void setup(){
+  Serial.begin(115200);
+  delay(500);
+  
+  Serial.println("\r\n════════════════════════════════════════");
+  Serial.println("ESP32 SPI Slave - Control de LEDs");
+  Serial.println("VERSIÓN FINAL - GPIO 14");
+  Serial.println("════════════════════════════════════════\r\n");
+  
+  // Configurar como OUTPUT (NO PWM)
+  pinMode(ledR, OUTPUT);
+  pinMode(ledG, OUTPUT);
+  pinMode(ledA, OUTPUT);
+  
+  digitalWrite(ledR, LOW);
+  digitalWrite(ledG, LOW);
+  digitalWrite(ledA, LOW);
+  
+  Serial.println("[INIT] Pines configurados como OUTPUT\n");
+  
+  // TEST
+  Serial.println("[TEST] LED ROJO...");
+  digitalWrite(ledR, HIGH);
+  delay(1000);
+  digitalWrite(ledR, LOW);
+  delay(500);
+  
+  Serial.println("[TEST] LED VERDE...");
+  digitalWrite(ledG, HIGH);
+  delay(1000);
+  digitalWrite(ledG, LOW);
+  delay(500);
+  
+  Serial.println("[TEST] LED AMARILLO...");
+  digitalWrite(ledA, HIGH);
+  delay(1000);
+  digitalWrite(ledA, LOW);
+  
+  Serial.println("[TEST] ✓ Todos los LEDs funcionan\n");
+  
+  // Inicializar SPI e I2C
+  initSPI_Correct();
+  
+  Wire.onReceive(onReceive);
+  Wire.onRequest(onRequest);
+  Wire.begin((uint8_t)I2C_DEV_ADDR, I2C_SDA, I2C_SCL, 0U);
+  Serial.println("I2C listo\n");
+
+  Serial.println("Sistema listo - Esperando datos SPI\n");
+}
+
+// ============================================================
+// LOOP
+// ============================================================
+void loop(){
+  procesarComandoSPI();
+  
+  memset(spi_slave_rx_buf, 0, BUFFER_SIZE);
+  memset(spi_slave_tx_buf, 0xAA, BUFFER_SIZE);
+  
+  memset(&t, 0, sizeof(t));
+  t.length = 3 * 8;
+  t.tx_buffer = spi_slave_tx_buf;
+  t.rx_buffer = spi_slave_rx_buf;
+  
+  esp_err_t ret = spi_slave_queue_trans(VSPI_HOST, &t, 100);
+  
+  if (ret == ESP_OK) {
+    spi_slave_transaction_t *rtrans = NULL;
+    ret = spi_slave_get_trans_result(VSPI_HOST, &rtrans, 0);
+    
+    if (ret == ESP_OK && rtrans != NULL && rtrans->trans_len > 0) {
+      Serial.println("\n[SPI] ¡¡¡ DATOS RECIBIDOS !!!");
+      Serial.println("[SPI] ═════════════════════════════");
+      Serial.print("[SPI] Bytes (hex): ");
+      Serial.print(spi_slave_rx_buf[0], HEX); Serial.print(" ");
+      Serial.print(spi_slave_rx_buf[1], HEX); Serial.print(" ");
+      Serial.println(spi_slave_rx_buf[2], HEX);
+      
+      spiLed = spi_slave_rx_buf[0];
+      spiTiempo = ((uint16_t)spi_slave_rx_buf[1] << 8) | spi_slave_rx_buf[2];
+      
+      Serial.print("[SPI] LED: ");
+      Serial.print(spiLed);
+      Serial.print(", Tiempo: ");
+      Serial.print(spiTiempo);
+      Serial.println(" ms");
+      Serial.println("[SPI] ═════════════════════════════\n");
+      
+      if (spiLed >= 1 && spiLed <= 3 && spiTiempo > 0 && spiTiempo <= 5000) {
+        spiCmd = true;
+        Serial.println("[SPI] ✓ Comando válido\n");
+      }
+    }
+  }
+  
+  delay(10);
+}
