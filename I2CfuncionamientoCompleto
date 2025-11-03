@@ -1,0 +1,353 @@
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//librerias
+#include <Arduino.h>
+#include <Wire.h>
+#include <driver/spi_slave.h>
+#include <LiquidCrystal.h>
+
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//definición de pines
+//leds
+#define ledR 15     
+#define ledG 2
+#define ledA 33 
+
+//SPI
+#define pot1 12
+#define SPI_SCK 18
+#define SPI_MISO 19
+#define SPI_MOSI 23
+#define SPI_SS 5
+
+//I2C
+#define I2C_DEV_ADDR 0x55
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+//LCD
+// Defincion de pines de pantalla LCD
+#define rs 34
+#define en 32
+#define d4 25
+#define d5 26
+#define d6 27
+#define d7 14
+
+//canales PWM
+#define pwmChannel1 0
+#define pwmChannel2 1
+#define pwmChannel3 2
+#define freqPWM 5000
+#define resPWM 8
+
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//variables globales
+//SPI
+int spiLed = 0;
+int spiTiempo = 0;
+bool spiCmd = false;
+
+//I2C
+bool modoI2C = false;
+uint8_t I2Cbuffer[4];
+bool I2CCmd = false;
+int valorBits = pot1;
+
+bool modoSPI = false;
+
+#define BUFFER_SIZE 32
+uint8_t spi_slave_rx_buf[BUFFER_SIZE];
+uint8_t spi_slave_tx_buf[BUFFER_SIZE];
+spi_slave_transaction_t t;
+
+//LCD
+// Instanciar objeto LCD
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+// Para ultimo led
+String ultimoLED = "N"; //Donde N = ninguno
+
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//prototipos de funciones
+void initPWM();
+//SPI
+void initSPI_Correct();
+void ejecutarComandoLed(int led, int tiempo);
+void procesarComandoSPI();
+//I2C
+void procesarComandoI2C();
+void onReceive(int numBytes);
+void onRequest();
+
+//LCD
+void actualizarLCD(float voltaje, int valorBits, String ultimoLED);
+
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//definición de funciones
+// FUNCIÓN: initPWM 
+void initPWM(){
+  Serial.println("[PWM] Configurando PWM...");
+  
+  ledcSetup(pwmChannel1, freqPWM, resPWM);
+  ledcAttachPin(ledR, pwmChannel1);
+  ledcWrite(pwmChannel1, 0);
+
+  ledcSetup(pwmChannel2, freqPWM, resPWM);
+  ledcAttachPin(ledG, pwmChannel2);
+  ledcWrite(pwmChannel2, 0);
+
+  ledcSetup(pwmChannel3, freqPWM, resPWM);
+  ledcAttachPin(ledA, pwmChannel3);
+  ledcWrite(pwmChannel3, 0);
+  
+  Serial.println("PWM configurado");
+}
+
+// FUNCIÓN: initSPI_Correct 
+void initSPI_Correct(){
+  Serial.println("[SPI] Inicializando SPI SLAVE...");
+  
+  spi_bus_config_t buscfg;
+  memset(&buscfg, 0, sizeof(buscfg));
+  buscfg.mosi_io_num = SPI_MOSI;
+  buscfg.miso_io_num = SPI_MISO;
+  buscfg.sclk_io_num = SPI_SCK;
+  buscfg.quadwp_io_num = -1;
+  buscfg.quadhd_io_num = -1;
+
+  spi_slave_interface_config_t slvcfg;
+  memset(&slvcfg, 0, sizeof(slvcfg));
+  slvcfg.mode = 0;
+  slvcfg.spics_io_num = SPI_SS;
+  slvcfg.queue_size = 3;
+  slvcfg.flags = 0;
+
+  spi_slave_initialize(VSPI_HOST, &buscfg, &slvcfg, 2);
+  memset(spi_slave_tx_buf, 0xAA, BUFFER_SIZE);
+}
+
+// FUNCIÓN: ejecutarComandoLed 
+void ejecutarComandoLed(int led, int tiempo){
+  digitalWrite(ledR, LOW);
+  digitalWrite(ledG, LOW);
+  digitalWrite(ledA, LOW);
+  delay(50);
+
+  switch (led){
+    case 1:
+      ultimoLED = "R";
+      Serial.println("[LED] Rojo Encendido");
+      digitalWrite(ledR, HIGH);
+      break;
+    case 2:
+      ultimoLED = "G";
+      Serial.println("[LED] Verde Encendido");
+      digitalWrite(ledG, HIGH);
+      break;
+    case 3:
+      ultimoLED = "A";
+      Serial.println("[LED] Amarillo Encendido");
+      digitalWrite(ledA, HIGH);
+      break;
+    default:
+      return;
+  }
+  
+  Serial.print("[LED] Duracion: ");
+  Serial.print(tiempo);
+  Serial.println(" ms");
+  delay(tiempo);
+
+  Serial.println("[LED] Apagando...");
+  digitalWrite(ledR, LOW);
+  digitalWrite(ledG, LOW);
+  digitalWrite(ledA, LOW);
+  Serial.println("[LED] LED apagado\n");
+  
+  modoI2C = false;
+  modoSPI = false;
+  spiCmd = false;
+  I2CCmd = false;
+}
+
+// FUNCIÓN: procesaComandoSPI
+void procesarComandoSPI(){
+  if (spiCmd) {
+    Serial.println("\n[SPI] .:・°☆.。.:・°☆.。.:・°☆.。.:・°☆* ");
+    Serial.print("[SPI] LED: ");
+    Serial.print(spiLed);
+    Serial.print(", Tiempo: ");
+    Serial.println(spiTiempo);
+    Serial.println("[SPI] .:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*\n");
+    
+    modoSPI = true;
+    ejecutarComandoLed(spiLed, spiTiempo);
+    spiCmd = false;
+  }
+}
+
+// FUNCIÓN: onReceive
+void onReceive(int numBytes) {
+  while (Wire.available()) {
+    uint8_t incomingByte = Wire.read();
+    Serial.write(incomingByte);
+  }
+}
+
+// FUNCIÓN: onRequest 
+void onRequest() {
+  int pot = analogRead(pot1);
+  float voltaje = (pot * 3.3) / 4095.0; // conversión a voltaje
+  
+  // Debug
+  Serial.print("[I2C] Pot = ");
+  Serial.print(pot);
+  Serial.print(" | Voltaje = ");
+  Serial.println(voltaje);
+
+  // Convertir float a bytes
+  uint8_t voltajeBytes[4];
+  memcpy(voltajeBytes, &voltaje, sizeof(float));
+
+  // Enviar al STM32 (4 bytes)
+  Wire.write(voltajeBytes, 4);
+
+  // Actualizar LCD
+  actualizarLCD(voltaje, pot, ultimoLED);
+}
+
+
+//FUNCIÓN: initLCD 
+void initLCD() {
+  //Configurar todos los pines LCD como OUTPUT primero
+  pinMode(rs, OUTPUT);
+  pinMode(en, OUTPUT); 
+  pinMode(d4, OUTPUT);
+  pinMode(d5, OUTPUT);
+  pinMode(d6, OUTPUT);
+  pinMode(d7, OUTPUT);
+  
+  //Inicializar LCD
+  lcd.begin(16, 2);
+  delay(50);
+  lcd.clear();
+  lcd.print("Iniciando...");
+}
+
+//FUNCIÓN: actualizarLCD
+void actualizarLCD(float voltaje, int valorBits, String ultimoLED){
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("V:");
+  lcd.print(voltaje, 2);
+  lcd.print(" B:");
+  lcd.print(valorBits);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Led:");
+  lcd.print(ultimoLED);
+}
+
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//setup
+void setup(){
+  Serial.begin(115200);
+  delay(500);
+  initLCD();
+  
+  Serial.println("\r\n.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*");
+  Serial.println("ESP32 SPI Slave - Control de LEDs");
+  Serial.println(".:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*\r\n");
+  
+  //configuraciones
+  pinMode(ledR, OUTPUT);
+  pinMode(ledG, OUTPUT);
+  pinMode(ledA, OUTPUT);
+  
+  digitalWrite(ledR, LOW);
+  digitalWrite(ledG, LOW);
+  digitalWrite(ledA, LOW);
+  
+  /* // TEST
+  Serial.println("[TEST] LED ROJO...");
+  digitalWrite(ledR, HIGH);
+  delay(1000);
+  digitalWrite(ledR, LOW);
+  delay(500);
+  
+  Serial.println("[TEST] LED VERDE...");
+  digitalWrite(ledG, HIGH);
+  delay(1000);
+  digitalWrite(ledG, LOW);
+  delay(500);
+  
+  Serial.println("[TEST] LED AMARILLO...");
+  digitalWrite(ledA, HIGH);
+  delay(1000);
+  digitalWrite(ledA, LOW);
+  
+  Serial.println("[TEST] Todos los LEDs funcionan\n");
+   */
+  
+   // Inicializar SPI
+  initSPI_Correct();
+  
+  //I2C
+  // Configuracion para Slave
+  // On receive realiza la tarea
+  Wire.onReceive(onReceive);
+  // On Request da info a Nucleo
+  Wire.onRequest(onRequest);
+  // Wire.print() --> funcion que envia el valor a nucleo (master)
+  Wire.begin((uint8_t)I2C_DEV_ADDR, I2C_SDA, I2C_SCL, 0U);
+  Serial.println("[I2C] I2C listo");
+
+  Serial.println("Sistema listo - Esperando datos SPI\n");
+}
+
+//.:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.・°☆.。.:・°☆.。.:・°☆.。.:・°☆*:.
+//loop
+void loop(){
+
+  procesarComandoSPI();
+  
+  memset(spi_slave_rx_buf, 0, BUFFER_SIZE);
+  memset(spi_slave_tx_buf, 0xAA, BUFFER_SIZE);
+  
+  memset(&t, 0, sizeof(t));
+  t.length = 3 * 8;
+  t.tx_buffer = spi_slave_tx_buf;
+  t.rx_buffer = spi_slave_rx_buf;
+  
+  esp_err_t ret = spi_slave_queue_trans(VSPI_HOST, &t, 100);
+  
+  if (ret == ESP_OK) {
+    spi_slave_transaction_t *rtrans = NULL;
+    ret = spi_slave_get_trans_result(VSPI_HOST, &rtrans, 0);
+    
+    if (ret == ESP_OK && rtrans != NULL && rtrans->trans_len > 0) {
+      Serial.println("\n[SPI] DATOS RECIBIDOS ");
+      Serial.println("[SPI] .:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*");
+      Serial.print("[SPI] Bytes (hex): ");
+      Serial.print(spi_slave_rx_buf[0], HEX); Serial.print(" ");
+      Serial.print(spi_slave_rx_buf[1], HEX); Serial.print(" ");
+      Serial.println(spi_slave_rx_buf[2], HEX);
+      
+      spiLed = spi_slave_rx_buf[0];
+      spiTiempo = ((uint16_t)spi_slave_rx_buf[1] << 8) | spi_slave_rx_buf[2];
+      
+      Serial.print("[SPI] LED: ");
+      Serial.print(spiLed);
+      Serial.print(", Tiempo: ");
+      Serial.print(spiTiempo);
+      Serial.println(" ms");
+      Serial.println("[SPI].:・°☆.。.:・°☆.。.:・°☆.。.:・°☆*\n");
+      
+      if (spiLed >= 1 && spiLed <= 3 && spiTiempo > 0 && spiTiempo <= 5000) {
+        spiCmd = true;
+        Serial.println("[SPI] Comando válido\n");
+      }
+    }
+  }
+  
+  delay(10);
+}
